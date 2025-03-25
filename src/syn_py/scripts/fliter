@@ -1,0 +1,275 @@
+#!/usr/bin/env python
+import rospy
+import rosbag
+import message_filters
+from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage
+from nav_msgs.msg import Path
+from tf2_msgs.msg import TFMessage
+from math import sqrt, atan2
+from tf.transformations import euler_from_quaternion
+import numpy as np
+from collections import deque
+from scipy.interpolate import interp1d
+
+'''不太清楚代码正确性
+class KalmanFilter:
+    def __init__(self):
+        self.Q = 1e-5
+        self.R = 0.01
+        self.x = 0.0
+        self.P = 1.0
+
+    def update(self, z_odom, z_imu):
+        x_pred = self.x
+        P_pred = self.P + self.Q
+
+        K = P_pred / (P_pred + self.R)
+        self.x = x_pred + K * (z_imu - x_pred)
+        self.P = (1 - K) * P_pred
+        return self.x
+'''
+'''
+目前还没用这个插值类。因为odom间隔太长了,似乎没有必要考虑odom消息和imu消息之间微小的时间差别
+况且其他消息和odom也有时间差。
+之后如果需要融合dodm信息和imu信息再用这个插值类
+'''
+#用于从odom数据的发布时间计算出相应时间的imu数据
+class IMUInterpolator:
+    def __init__(self, max_cache_size=200):
+        self.imu_cache = deque(maxlen=max_cache_size)
+        self.last_stamp = None
+       
+    
+    def add_imu_data(self, imu_msg):
+        timestep = imu_msg.header.stamp.to_sec()
+        angular_z = imu_msg.angular_velocity.z
+        self.imu_cache.append((timestep, angular_z))
+
+    def get_interpolated_imu(self, target_time):
+        if len(self.imu_cache) < 2:
+            return (False, 0.0)
+        timestamps = np.array([t for t,_ in self.imu_cache])
+        angular_z_values = np.array([w for _, w in self.imu_cache])
+
+        if target_time < timestamps[0] or target_time > timestamps[-1]:
+            return (False, angular_z_values[-1])
+        
+        try:
+            interpolator = interp1d(
+                timestamps,
+                angular_z_values,
+                kind='linear',
+                bounds_error=False,
+                fill_value='extrapolate'
+            )
+            return (True, float(interpolator(target_time)))
+        except:
+            return (False, angular_z_values[-1])
+        
+
+'''程序的主体'''  
+class BagProcesser:
+    def __init__(self,bag_path):
+        rospy.init_node('bag_processor', anonymous=True)
+        rospy.set_param('/use_sim_time', True)
+        self.last_odom_1 = None
+        self.last_odom_2 = None
+        self.last_stamp_1 = None
+        self.last_stamp_2 = None
+        self.zed2_imu_interpolator = IMUInterpolator()
+        self.ouster_imu_interpolator = IMUInterpolator()
+
+        self._init_subscribers()
+        self._init_synchronizer()
+
+        self.bag = rosbag.Bag(bag_path)
+        self._setup_sim_time()
+
+    
+    def _init_subscribers(self):
+        self.camera_info_sub = message_filters.Subscriber('/camera/color/camera_info', CameraInfo)
+        self.image_sub = message_filters.Subscriber('/camera/color/image_raw/compressed', CompressedImage)
+        self.odom_sub = message_filters.Subscriber('zed2/zed_node/path_odom', Path)
+        self.points_sub = message_filters.Subscriber('/ouster/points', PointCloud2)
+        self.tf_sub = message_filters.Subscriber('/tf',TFMessage)
+        self.ouster_imu_sub = message_filters.Subscriber('/ouster/imu',Imu)
+        self.zed2_imu_sub = message_filters.Subscriber('/zed2/zed_node/imu/data',Imu)
+        # self.zed2_imu_sub.registerCallback(self.zed2_imu_callback)
+        # self.ouster_imu_sub.registerCallback(self.ouster_imu_callback)
+    
+    def _init_synchronizer(self):
+        #用ApproximateTimeSynchronizer对齐时间戳
+        self.ats = message_filters.ApproximateTimeSynchronizer(
+            [self.camera_info_sub, 
+             self.image_sub, 
+             self.odom_sub, 
+             self.points_sub, 
+             self.tf_sub, 
+             self.ouster_imu_sub, 
+             self.zed2_imu_sub
+            ],
+            queue_size=300,
+            slop=10,
+            allow_headerless=True
+        )
+
+        #注册相应回调函数
+        self.ats.registerCallback(self.callback)
+    
+    def _setup_sim_time(self):
+        start_time_sec = self.bag.get_start_time()
+        start_time = rospy.Time.from_sec(start_time_sec)
+        rospy.rostime._set_rostime(start_time)
+
+    #计算线速度、角速度的回调函数
+    def callback(self, camera_info_msg, image_msg, odom_msg, points_msg, tf_msg, ouster_imu_msg, zed2_imu_msg):
+
+        #首先确认是否收到消息并打印时间戳
+        print('Received synchronized messages')
+        # 提取所有时间戳（转换为秒浮点数）
+        timestamps_sec = [
+            camera_info_msg.header.stamp.to_sec(),   # Camera Info
+            image_msg.header.stamp.to_sec(),         # Image
+            odom_msg.header.stamp.to_sec(),          # Odometry
+            points_msg.header.stamp.to_sec(),        # Points
+            tf_msg.transforms[0].header.stamp.to_sec(),  # TF (取第一个transform的时间)
+            ouster_imu_msg.header.stamp.to_sec(),    # Ouster Imu
+            zed2_imu_msg.header.stamp.to_sec()       # Zed2 Imu
+        ]
+
+        # 计算基准时间（通常以Camera Info或Image为基准）
+        base_time = timestamps_sec[0]  # Camera Info作为基准
+
+        # 计算各消息与基准的时间差（单位：秒）
+        time_diffs = {
+            "Camera Info": 0.0,
+            "Image": timestamps_sec[1] - base_time,
+            "Odometry": timestamps_sec[2] - base_time,
+            "Points": timestamps_sec[3] - base_time,
+            "TF": timestamps_sec[4] - base_time,
+            "Ouster Imu": timestamps_sec[5] - base_time,
+            "Zed2 Imu": timestamps_sec[6] - base_time
+        }
+
+        # 计算消息组内的最大时间差（所有消息之间的最大间隔）
+        min_stamp = min(timestamps_sec)
+        max_stamp = max(timestamps_sec)
+        group_max_diff = max_stamp - min_stamp
+
+        # 打印结果
+        print("\n--- 时间差分析 ---")
+        for msg_type, diff in time_diffs.items():
+            print(f"{msg_type} 相对基准时间差: {diff:.6f}秒")
+
+        print(f"\n消息组内最大时间差: {group_max_diff:.6f}秒 (约 {group_max_diff * 1e3:.2f}毫秒)")
+        print("-----------------\n")
+
+        # 处理Path消息
+        if len(odom_msg.poses) == 0:
+            print("收到空路径消息，跳过处理")
+            return
+        
+        # 设置变量值
+        current_pose = odom_msg.poses[-1].pose
+        current_stamp = odom_msg.poses[-1].header.stamp.to_sec()
+
+        # 用里程计差值计算线速度和角速度
+        if self.last_odom_1 is not None and self.last_odom_2 is not None and len(self.last_odom_1.poses) > 0 and len(self.last_odom_2.poses) > 0:
+            last_pose_2 = self.last_odom_2.poses[-1].pose
+            dt = current_stamp - self.last_stamp_2
+            print(f"\n I'm HERE!!!!!!\n")
+            vx,vy = self.getLinearVelocity(current_pose, last_pose_2, dt)
+            angular_vel = self.getAngularVelocity(current_pose, last_pose_2, dt)
+            #angular_vel = kf.update(angular_vel, imu_angular_z)
+            print(f"Vx :{vx:.2f} m/s")
+            print(f"Vy :{vy:.2f} m/s")
+            print(f"Angular Velocity:{angular_vel:.2f} rad/s")
+            print(f"IMU Angular Velocity:{zed2_imu_msg.angular_velocity.z} rad/s")#为什么x和y的角速度也是有的？
+            print("-----------------\n")
+
+        # 将位置存储用于下一次计算
+        self.last_odom_2 = self.last_odom_1
+        self.last_odom_1 = odom_msg
+        self.last_stamp_2 = self.last_stamp_1
+        self.last_stamp_1 = current_stamp
+
+    #用于储存zed2_imu数据的回调函数
+    def zed2_imu_callback(self, imu_msg):
+        self.zed2_imu_interpolator.add_imu_data(imu_msg)
+        
+
+    #用于储存ouster_imu数据的回调函数
+    def ouster_imu_callback(self, imu_msg):
+        # print("hello")
+        self.ouster_imu_interpolator.add_imu_data(imu_msg)
+
+    #具体计算线速度
+    def getLinearVelocity(self, current_pose, last_pose, dt):
+        dx = current_pose.position.x - last_pose.position.x
+        dy = current_pose.position.y - last_pose.position.y
+        return dx / dt if dt > 0 else 0.0, dy / dt if dt > 0 else 0.0
+
+    #具体计算角速度
+    def getAngularVelocity(self, current_pose, last_pose, dt):
+        current_q = [
+            current_pose.orientation.x,
+            current_pose.orientation.y,
+            current_pose.orientation.z,
+            current_pose.orientation.w
+        ]
+        last_q = [
+            last_pose.orientation.x,
+            last_pose.orientation.y,
+            last_pose.orientation.z,
+            last_pose.orientation.w
+        ]
+        #将四元数转化为欧拉角之后计算角速度
+        _,_,yaw_current = euler_from_quaternion(current_q)
+        _,_,yaw_last = euler_from_quaternion(last_q)
+        delta_yaw = yaw_current - yaw_last
+        return delta_yaw / dt if dt > 0 else 0.0
+    
+    def process(self):
+        try:
+            #按时间遍历bag中msg，存储目标话题的消息并传入订阅
+            for topic, msg, t in self.bag.read_messages(topics=[
+                '/camera/color/camera_info', 
+                '/camera/color/image_raw/compressed', 
+                '/zed2/zed_node/path_odom', 
+                '/ouster/points', 
+                '/tf',
+                '/ouster/imu',
+                '/zed2/zed_node/imu/data'
+                ]):
+
+                if topic == '/camera/color/camera_info':
+                    #print(f"Hello from camera!")
+                    self.camera_info_sub.signalMessage(msg)
+                elif topic == '/camera/color/image_raw/compressed':
+                    #print(f"Hello from image!")
+                    self.image_sub.signalMessage(msg)
+                elif topic == '/zed2/zed_node/path_odom':
+                    # print(f"Hello from odom!")
+                    self.odom_sub.signalMessage(msg)
+                elif topic == '/ouster/points':
+                    # print(f"Hello from points!")
+                    self.points_sub.signalMessage(msg)
+                elif topic == '/tf':
+                    # print(f"Hello from tf!")
+                    self.tf_sub.signalMessage(msg)
+                elif topic == '/ouster/imu':
+                    #print(f"\nHello from ouster_imu!\n")
+                    self.ouster_imu_sub.signalMessage(msg)
+                elif topic == '/zed2/zed_node/imu/data':
+                    #print(f"\nHello from zed_imu!\n")
+                    self.zed2_imu_sub.signalMessage(msg)
+        finally:
+            self.bag.close()
+
+
+
+
+#程序最开始执行的部分，读取包、变量初始化、创建订阅收取话题消息
+if __name__ == '__main__':
+    processor = BagProcesser('2024-12-24-18-37-36.bag')
+    processor.process()

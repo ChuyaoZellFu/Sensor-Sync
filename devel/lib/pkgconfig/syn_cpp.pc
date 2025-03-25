@@ -1,0 +1,8 @@
+prefix=/home/slam327/syn_ws/devel
+
+Name: syn_cpp
+Description: Description of syn_cpp
+Version: 0.0.0
+Cflags: -I/home/slam327/syn_ws/devel/include
+Libs: -L${prefix}/lib 
+Requires: message_runtime std_msgs

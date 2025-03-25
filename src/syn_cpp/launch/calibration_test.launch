@@ -1,0 +1,35 @@
+<launch>
+    <param name="/use_sim_time" value="true" />
+    <arg name="bag_date" default="2024-12-24-18-37-36" />
+    <arg name="delay" default="3" /> <!-- Pause duration in seconds -->
+    <!-- Start the sync_sensors node -->
+    <node name="sync_sensors" pkg="syn_cpp" type="calibration_test" output="screen">
+        <param name="date" value="$(arg bag_date)" />
+    </node>
+    <!-- Extrinsics -->
+    <!-- PREVIOUS before 2024/12/16-->
+    <!-- <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher1" args="0.05035999 -0.08019131 -0.03879834 0.43766706 -0.43159289  0.55855325  0.55695008 zed2_left_camera_optical_frame os_sensor"/> -->
+    
+    <!-- PREVIOUS before 2024/12/16-->
+    <!-- <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher2" args="0.06528398, -0.2988811, -0.04110306 -0.11598044 -0.01455757  0.00543902  0.99312992 zed2_left_camera_optical_frame theta_camera_optical_frame"/> -->
+
+    <!-- NOW after 2024/12/16--> <!-- based previous calibration and ZhanYu's fintuning-->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher1" args="-0.003, 0.212, 0.003 0.505, -0.488, 0.495, 0.512 theta_camera_optical_frame os_sensor"/>
+
+    <!-- NOW after 2024/12/16--> <!-- TRUE-->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher2" args="0.11540335 -0.31534779 -0.06535279 -0.06479868 -0.01478066  0.00892244  0.99774899 zed2_left_camera_optical_frame theta_camera_optical_frame"/>
+
+
+    <!-- Play the bag file with the date as its name, use the bag's timestamps, and delay the play start -->
+    <node name="play_bag" pkg="rosbag" type="play" args="/home/slam327/syn_ws/src/syn_cpp/$(arg bag_date).bag --clock -r 0.2 --delay=$(arg delay)" output="screen" />
+    <!-- JSON 数据发布节点 -->
+    <node name="json_publisher" pkg="syn_cpp" type="json_pub_node" output="screen">
+        <param name="json_path" value="/home/slam327/syn_ws/src/syn_cpp/src/2024-12-24-18-37-36.json" />
+        <param name="playback_rate" value="0.2" />
+        <param name="initial_delay" value="$(arg delay)" />
+    </node>
+    
+    <!-- Open the rpf_bench_calibration.rviz file -->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d /home/slam327/syn_ws/src/syn_cpp/rviz/rpf_bench_calibration.rviz" />
+
+</launch>

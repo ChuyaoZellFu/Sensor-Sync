@@ -1,0 +1,12 @@
+看stamps，不要看sequence
+stamps似乎并不是等时间间隔的，并且很难找到两个纳秒数完全相同的时间。因此需要使用approximately的时间对齐器。
+20000000纳秒为近似时间单位？
+
+统计各类消息的间隔时间：
+tf：0.04s 但是奇怪的是相同的消息会发送两遍，并且seq没有正常更新。
+ouster/imu:0.01s
+zed2/zed_node/imu/data:0.002-0.003s
+ouster/points:看不到header..
+zed2/zed_node/path_odom:0.5s
+camera/color/camera_info:0.04s
+camera/color/image_raw/compressed:也看不到header

@@ -1,0 +1,508 @@
+#!/usr/bin/env python3
+import math
+import rospy
+import message_filters
+from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage
+import sensor_msgs.point_cloud2 as pc2
+from nav_msgs.msg import Path
+from tf2_msgs.msg import TFMessage
+from tf.transformations import euler_from_quaternion
+import os
+import cv2
+import numpy as np
+from datetime import datetime
+import open3d as o3d
+import struct
+import tf2_ros
+import tf2_py as tf2
+from cv_bridge import CvBridge, CvBridgeError
+from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
+from sensor_msgs.point_cloud2 import read_points
+
+class Fliter():
+    def __init__(self):
+        rospy.init_node('fliter_node',anonymous=False)
+        rospy.set_param('/use_sim_time', True)
+        self.last_odom_1 = None
+        self.last_odom_2 = None
+        self.last_stamp_1 = None
+        self.last_stamp_2 = None
+
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+        # 初始化cv_bridge
+        self.bridge = CvBridge()
+        
+        # 创建图像发布者（使用image_transport的Python等效方式）
+        self.image_pub_zed = rospy.Publisher("/projected_image_zed", CompressedImage, queue_size=1)
+        self.image_pub_pan = rospy.Publisher("/projected_image_pan", CompressedImage, queue_size=1)
+
+        self._init_subscribers()
+        self._init_synchronizer()
+        self.data_root = os.path.expanduser("~/sensor_data")  # 存储根目录
+        self._init_storage()
+
+    def _init_subscribers(self):
+        self.camera_info_sub = message_filters.Subscriber('/camera/color/camera_info', CameraInfo)
+        self.zed_camera_info_sub = message_filters.Subscriber('/zed2/zed_node/rgb/camera_info', CameraInfo)
+        self.image_sub = message_filters.Subscriber('/camera/color/image_raw/compressed', CompressedImage)
+        self.zed_image_sub = message_filters.Subscriber('/zed2/zed_node/rgb/image_rect_color/compressed',CompressedImage)
+        self.odom_sub = message_filters.Subscriber('zed2/zed_node/path_odom', Path)
+        self.points_sub = message_filters.Subscriber('/ouster/points', PointCloud2)
+        self.tf_sub = message_filters.Subscriber('/tf',TFMessage)
+        self.ouster_imu_sub = message_filters.Subscriber('/ouster/imu',Imu)
+        self.zed2_imu_sub = message_filters.Subscriber('/zed2/zed_node/imu/data',Imu)
+
+    def _init_synchronizer(self):
+        #用ApproximateTimeSynchronizer对齐时间戳
+        self.ats = message_filters.ApproximateTimeSynchronizer(
+            [self.camera_info_sub, 
+             self.zed_camera_info_sub,
+             self.image_sub, 
+             self.zed_image_sub,
+             self.odom_sub, 
+             self.points_sub, 
+             self.tf_sub, 
+             self.ouster_imu_sub, 
+             self.zed2_imu_sub
+            ],
+            queue_size=30,
+            slop=0.5,
+            allow_headerless=True
+        )
+
+        #注册相应回调函数
+        # self.camera_info_sub.registerCallback(self.camera_info_callback)
+        # self.zed_camera_info_sub.registerCallback(self.zed_camera_info_callback)
+        # self.image_sub.registerCallback(self.image_callback)
+        # self.odom_sub.registerCallback(self.odom_callback)
+        # self.points_sub.registerCallback(self.points_callback)
+        # self.tf_sub.registerCallback(self.tf_callback)
+        # self.zed2_imu_sub.registerCallback(self.zed2_imu_callback)
+        # self.ouster_imu_sub.registerCallback(self.ouster_imu_callback)
+
+        self.ats.registerCallback(self.callback)
+
+    def _init_storage(self):
+        """创建按日期命名的存储目录"""
+        today = datetime.now().strftime("%Y%m%d")
+        self.camera_info_path = os.path.join(self.data_root, "Camera_info" ,today)
+        self.zed_camera_info_path = os.path.join(self.data_root, "ZED_Camera_info" ,today)
+        self.image_path = os.path.join(self.data_root, "Image" ,today)
+        self.zed_image_path = os.path.join(self.data_root, "ZED_Image" ,today)
+        self.odometry_path = os.path.join(self.data_root, "Odom" ,today)
+        self.points_path = os.path.join(self.data_root, "Points" ,today)
+        self.tf_path = os.path.join(self.data_root, "TF" ,today)
+        self.imu_path = os.path.join(self.data_root, "imu" ,today)
+
+        for paths in [self.camera_info_path,
+                    self.image_path,
+                    self.odometry_path,
+                    self.points_path,
+                    self.tf_path,
+                    self.imu_path]:
+            try:
+                os.makedirs(paths, exist_ok=True)
+                rospy.loginfo(f"数据存储目录已创建：{paths}")
+            except Exception as e:
+                rospy.logerr(f"目录创建失败：{str(e)}")
+                raise
+
+    def callback(self, camera_info_msg, zed_camera_info_msg, 
+                 image_msg, zed_image_msg, odom_msg, points_msg, 
+                 tf_msg, ouster_imu_msg, zed2_imu_msg):
+
+        #首先确认是否收到消息并打印时间戳
+        print('Received synchronized messages')
+        # 提取所有时间戳（转换为秒浮点数）
+        timestamps_sec = [
+            camera_info_msg.header.stamp.to_sec(),   # Camera Info
+            zed_camera_info_msg.header.stamp.to_sec(),
+            image_msg.header.stamp.to_sec(),         # Image
+            zed_image_msg.header.stamp.to_sec(),
+            odom_msg.header.stamp.to_sec(),          # Odometry
+            points_msg.header.stamp.to_sec(),        # Points
+            tf_msg.transforms[0].header.stamp.to_sec(),  # TF (取第一个transform的时间)
+            ouster_imu_msg.header.stamp.to_sec(),    # Ouster Imu
+            zed2_imu_msg.header.stamp.to_sec()       # Zed2 Imu
+        ]
+
+        # 计算基准时间（通常以Camera Info或Image为基准）
+        base_time = timestamps_sec[0]  # Camera Info作为基准
+
+        # 计算各消息与基准的时间差（单位：秒）
+        time_diffs = {
+            "Camera Info": 0.0,
+            "Image": timestamps_sec[1] - base_time,
+            "Odometry": timestamps_sec[2] - base_time,
+            "Points": timestamps_sec[3] - base_time,
+            "TF": timestamps_sec[4] - base_time,
+            "Ouster Imu": timestamps_sec[5] - base_time,
+            "Zed2 Imu": timestamps_sec[6] - base_time
+        }
+
+        # 计算消息组内的最大时间差（所有消息之间的最大间隔）
+        min_stamp = min(timestamps_sec)
+        max_stamp = max(timestamps_sec)
+        group_max_diff = max_stamp - min_stamp
+
+        # 打印结果
+        print("\n--- 时间差分析 ---")
+        for msg_type, diff in time_diffs.items():
+            print(f"{msg_type} 相对基准时间差: {diff:.6f}秒")
+
+        print(f"\n消息组内最大时间差: {group_max_diff:.6f}秒 (约 {group_max_diff * 1e3:.2f}毫秒)")
+        print("-----------------\n")
+
+        # 处理Path消息
+        if len(odom_msg.poses) == 0:
+            print("收到空路径消息，跳过处理")
+            return
+        
+        # 设置变量值
+        current_pose = odom_msg.poses[-1].pose
+        current_stamp = odom_msg.poses[-1].header.stamp.to_sec()
+
+        # 用里程计差值计算线速度和角速度
+        if self.last_odom_1 is not None and self.last_odom_2 is not None and len(self.last_odom_1.poses) > 0 and len(self.last_odom_2.poses) > 0:
+            last_pose_2 = self.last_odom_2.poses[-1].pose
+            dt = current_stamp - self.last_stamp_2
+            print(f"\n I'm HERE!!!!!!\n")
+            vx,vy = self.getLinearVelocity(current_pose, last_pose_2, dt)
+            angular_vel = self.getAngularVelocity(current_pose, last_pose_2, dt)
+            #angular_vel = kf.update(angular_vel, imu_angular_z)
+            print(f"Vx :{vx:.2f} m/s")
+            print(f"Vy :{vy:.2f} m/s")
+            print(f"Angular Velocity:{angular_vel:.2f} rad/s")
+            print(f"IMU Angular Velocity:{zed2_imu_msg.angular_velocity.z} rad/s")#为什么x和y的角速度也是有的？
+            print("-----------------\n")
+
+        # 将位置存储用于下一次计算
+        self.last_odom_2 = self.last_odom_1
+        self.last_odom_1 = odom_msg
+        self.last_stamp_2 = self.last_stamp_1
+        self.last_stamp_1 = current_stamp
+
+
+        # 新增数据存储功能
+        try:
+            # 生成统一时间基准（网页1、3、6提到时间戳对齐的重要性）
+            base_time = timestamps_sec[0]
+            time_str = f"{base_time:.6f}".replace(".", "_")
+            
+            # 保存相机信息（网页3的rosbag存储结构参考）
+            self._save_camera_info(camera_info_msg, time_str, zed=False)
+            self._save_camera_info(zed_camera_info_msg, time_str, zed=True)
+            
+            # 保存压缩图像（网页1的传感器数据存储示例）
+            self._save_compressed_image(image_msg, time_str, zed=False)
+            self._save_compressed_image(zed_image_msg, time_str, zed=True)
+            
+            # 保存点云数据（网页3的点云处理参考）
+            self._save_pointcloud(points_msg, time_str)
+            
+            # 保存IMU数据（网页5的时间同步要求）
+            self._save_imu_data(ouster_imu_msg, zed2_imu_msg, time_str)
+            
+            # 保存TF和Odom（网页4的消息处理示例）
+            self._save_tf_odom(tf_msg, odom_msg, time_str)
+            
+        except Exception as e:
+            rospy.logerr(f"数据存储失败：{str(e)}")
+
+        '''新增部分：点云到图像投影以及点云标注'''
+        # 获取激光雷达到zed相机的变换
+        try:
+            # 获取坐标变换
+            transform_stamped_zed = self.tf_buffer.lookup_transform(
+                target_frame=zed_camera_info_msg.header.frame_id,
+                source_frame=points_msg.header.frame_id,
+                time=points_msg.header.stamp,
+                timeout=rospy.Duration(0.1))
+        except (tf2.LookupException, tf2.ConnectivityException, tf2.ExtrapolationException) as e:
+            rospy.logwarn(f"TF error: {str(e)}")
+            return
+        # 获取激光雷达到全景相机的变换
+        try:
+            # 获取坐标变换
+            transform_stamped_pan = self.tf_buffer.lookup_transform(
+                target_frame=camera_info_msg.header.frame_id,
+                source_frame=points_msg.header.frame_id,
+                time=points_msg.header.stamp,
+                timeout=rospy.Duration(0.1))
+        except (tf2.LookupException, tf2.ConnectivityException, tf2.ExtrapolationException) as e:
+            rospy.logwarn(f"TF error: {str(e)}")
+            return
+        
+        #将点云转换到zed相机坐标系
+        transformed_cloud_zed = do_transform_cloud(points_msg, transform_stamped_zed)
+        #将点云转换到全景相机坐标系
+        transformed_cloud_pan = do_transform_cloud(points_msg, transform_stamped_pan)
+
+        #创建用于投影的图像
+        try:
+            # 转换ROS图像消息为OpenCV格式 (BGR8编码)
+            image_pan = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding='bgr8')
+            image_zed = self.bridge.imgmsg_to_cv2(zed_image_msg, desired_encoding='bgr8')
+            
+            # 创建图像拷贝（深拷贝）
+            projected_image_zed = image_zed.copy()
+            projected_image_pan = image_pan.copy()
+    
+        except CvBridgeError as e:
+            print(f"图像转换失败: {str(e)}")
+            return None
+
+        #投影点云到ZED图像平面
+        self.point_to_image_proj(transformed_cloud_zed,projected_image_zed)
+        #投影点云到全景相机图像平面
+        self.point_to_image_proj(transformed_cloud_pan,projected_image_pan)
+
+        #发布投影后ZED图像
+        try:
+            # 将OpenCV图像转换为ROS Image消息
+            output_msg_zed = self.bridge.cv2_to_imgmsg(projected_image_zed, encoding="bgr8")
+            # 保持与原始消息相同的header信息（时间戳+坐标系）
+            output_msg_zed.header = zed_image_msg.header
+            # 发布消息
+            self.image_pub_zed.publish(output_msg_zed)
+        except CvBridgeError as e:
+            rospy.logerr("图像转换失败: %s", str(e))
+        
+        #发布投影后全景图像
+        try:
+            # 将OpenCV图像转换为ROS Image消息
+            output_msg_pan = self.bridge.cv2_to_imgmsg(projected_image_pan, encoding="bgr8")
+            # 保持与原始消息相同的header信息（时间戳+坐标系）
+            output_msg_pan.header = image_msg.header
+            # 发布消息
+            self.image_pub_pan.publish(output_msg_pan)
+        except CvBridgeError as e:
+            rospy.logerr("图像转换失败: %s", str(e))
+
+        
+    #点云到图像的投影
+    def point_to_image_proj(self, transformed_cloud, projected_image):
+        min_D, max_D = 0.0, 50.0
+        for point in read_points(transformed_cloud, field_names=("x", "y", "z"), skip_nans=True):
+            x, y, z = point[0], point[1], point[2]
+            
+            if z <= 0:
+                continue
+            
+            (u,v) = self.projection_calculator(x,y,z,projected_image.shape[1],projected_image.shape[0])
+            
+            # 边界检查
+            if 0 <= u < projected_image.shape[1] and 0 <= v < projected_image.shape[0]:
+                # 计算颜色强度
+                D = z
+                intensity = 255 * (1 - (D - min_D) / (max_D - min_D))
+                intensity = np.clip(intensity, 0, 255)
+                
+                # 绘制点
+                cv2.circle(projected_image, (u, v), 1, (intensity,)*3, -1)
+
+
+    def projection_calculator(X,Y,Z,image_width,image_height):
+        # 计算水平角度（范围：-π 到 π）
+        theta = math.atan2(X, Z)  # 注意参数顺序为 (y, x)，这里使用 (X, Z)
+        
+        # 计算垂直角度（范围：-π/2 到 π/2）
+        denominator = math.sqrt(X**2 + Y**2 + Z**2)
+        if denominator == 0:
+            return (0, 0)  # 避免除以零错误
+        phi = math.asin(-Y / denominator)
+        
+        # 将角度映射到图像坐标系
+        # 水平方向：将 [-π, π] 映射到 [0, image_width]
+        u = int(image_width * ( (theta + math.pi) / (2 * math.pi) ))
+        
+        # 垂直方向：将 [-π/2, π/2] 映射到 [0, image_height]
+        v = int(image_height * ( (math.pi/2 - phi) / math.pi ))
+        
+        # 限制坐标在图像范围内
+        u = max(0, min(u, image_width - 1))
+        v = max(0, min(v, image_height - 1))
+        
+        return (u, v)
+    
+    
+    #具体计算线速度
+    def getLinearVelocity(self, current_pose, last_pose, dt):
+        dx = current_pose.position.x - last_pose.position.x
+        dy = current_pose.position.y - last_pose.position.y
+        return dx / dt if dt > 0 else 0.0, dy / dt if dt > 0 else 0.0
+
+    #具体计算角速度
+    def getAngularVelocity(self, current_pose, last_pose, dt):
+        current_q = [
+            current_pose.orientation.x,
+            current_pose.orientation.y,
+            current_pose.orientation.z,
+            current_pose.orientation.w
+        ]
+        last_q = [
+            last_pose.orientation.x,
+            last_pose.orientation.y,
+            last_pose.orientation.z,
+            last_pose.orientation.w
+        ]
+        #将四元数转化为欧拉角之后计算角速度
+        _,_,yaw_current = euler_from_quaternion(current_q)
+        _,_,yaw_last = euler_from_quaternion(last_q)
+        delta_yaw = yaw_current - yaw_last
+        return delta_yaw / dt if dt > 0 else 0.0
+    
+    def _save_camera_info(self, msg, time_str, zed):
+        """保存相机标定参数(适配空矩阵和ROI区域)"""
+        if not zed:
+            path = os.path.join(self.camera_info_path, f"camera_info_{time_str}.yaml")
+        else:
+            path = os.path.join(self.zed_camera_info_path, f"camera_info_{time_str}.yaml")
+        with open(path, 'w') as f:
+            # 基础参数存储
+            f.write(f"header:\n")
+            f.write(f"  seq: {msg.header.seq}\n")
+            f.write(f"  stamp:\n")
+            f.write(f"    secs: {msg.header.stamp.secs}\n")
+            f.write(f"    nsecs: {msg.header.stamp.nsecs}\n")
+            f.write(f"  frame_id: \"{msg.header.frame_id}\"\n")
+            f.write(f"height: {msg.height}\n")
+            f.write(f"width: {msg.width}\n")
+            f.write(f"distortion_model: \"{msg.distortion_model}\"\n")  # 处理空字符串
+            
+            # 矩阵存储逻辑优化
+            def _save_matrix(name, matrix, rows, cols):
+                """处理空矩阵和多维数组格式化"""
+                if len(matrix) == 0 or all(v == 0 for v in matrix):
+                    f.write(f"{name}: []\n")
+                else:
+                    np.savetxt(f, np.array(matrix).reshape(rows, cols), 
+                            header=f"{name}:", fmt='%.6f', comments='')
+            
+            # 矩阵参数存储
+            _save_matrix("D", msg.D, 1, -1)  # 畸变系数（一维数组）
+            _save_matrix("K", msg.K, 3, 3)   # 内参矩阵（3x3）
+            _save_matrix("R", msg.R, 3, 3)   # 矫正矩阵（3x3）
+            _save_matrix("P", msg.P, 3, 4)   # 投影矩阵（3x4）
+
+            # ROI区域补充存储
+            f.write(f"roi:\n")
+            f.write(f"  x_offset: {msg.roi.x_offset}\n")
+            f.write(f"  y_offset: {msg.roi.y_offset}\n")
+            f.write(f"  height: {msg.roi.height}\n")
+            f.write(f"  width: {msg.roi.width}\n")
+            f.write(f"  do_rectify: {msg.roi.do_rectify}\n")
+
+    def _save_compressed_image(self, msg, time_str, zed):
+        """保存JPEG压缩图像(网页1的图像存储建议)"""
+        if not zed:
+            path = os.path.join(self.image_path, f"image_{time_str}.jpg")
+        else:
+            path = os.path.join(self.zed_image_path, f"image_{time_str}.jpg")
+        np_arr = np.frombuffer(msg.data, np.uint8)
+        cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        cv2.imwrite(path, cv_image)
+
+    def _save_pointcloud(self, msg, time_str):
+
+        # 提取坐标
+        points_np = np.array(list(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)), dtype=np.float32)
+        
+        # 创建Open3D点云对象
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points_np)
+        
+        # 检查是否存在颜色字段（支持 'rgb' 或 'rgba'）
+        has_color = False
+        color_fields = []
+        for field in msg.fields:
+            if field.name in ['rgb', 'rgba']:
+                has_color = True
+                color_fields.append(field.name)
+            elif field.name in ['r', 'g', 'b']:
+                has_color = True
+                color_fields.extend(['r', 'g', 'b'])
+                break  # 假设r、g、b连续存在
+        
+        if has_color:
+            colors = []
+            # 处理颜色，考虑不同的存储方式
+            if 'rgb' in color_fields or 'rgba' in color_fields:
+                # 解析打包的rgb/rgba字段（通常为float32或uint32）
+                for p in pc2.read_points(msg, field_names=color_fields, skip_nans=True):
+                    color = p[3] if 'rgba' in color_fields else p[3]  # 假设颜色在第4个位置
+                    # 将float32转换为4个字节
+                    rgb_bytes = struct.pack('!f', color) if msg.is_bigendian else struct.pack('<f', color)
+                    r = rgb_bytes[0] / 255.0
+                    g = rgb_bytes[1] / 255.0
+                    b = rgb_bytes[2] / 255.0
+                    colors.append([r, g, b])
+            elif 'r' in color_fields and 'g' in color_fields and 'b' in color_fields:
+                # 直接读取r、g、b分量的值
+                for p in pc2.read_points(msg, field_names=["r", "g", "b"], skip_nans=True):
+                    r = p[0] / 255.0
+                    g = p[1] / 255.0
+                    b = p[2] / 255.0
+                    colors.append([r, g, b])
+            if colors:
+                pcd.colors = o3d.utility.Vector3dVector(np.array(colors, dtype=np.float32))
+        
+        # 保存为PCD文件（保留所有属性）
+        path = os.path.join(self.points_path, f"points_{time_str}.pcd")
+        o3d.io.write_point_cloud(
+            path, pcd,
+            write_ascii=False, 
+            compressed=True,
+            print_progress=True
+        )
+
+    def _save_imu_data(self, ouster_imu, zed_imu, time_str):
+        """保存双IMU数据(网页5的多传感器同步要求)"""
+        path = os.path.join(self.imu_path, f"imu_{time_str}.csv")
+        with open(path, 'w') as f:
+            f.write("sensor,ax,ay,az,wx,wy,wz\n")
+            # Ouster IMU
+            f.write(f"ouster,{ouster_imu.linear_acceleration.x:.6f},")
+            f.write(f"{ouster_imu.linear_acceleration.y:.6f},")
+            f.write(f"{ouster_imu.linear_acceleration.z:.6f},")
+            f.write(f"{ouster_imu.angular_velocity.x:.6f},")
+            f.write(f"{ouster_imu.angular_velocity.y:.6f},")
+            f.write(f"{ouster_imu.angular_velocity.z:.6f}\n")
+            # Zed IMU
+            f.write(f"zed2,{zed_imu.linear_acceleration.x:.6f},")
+            f.write(f"{zed_imu.linear_acceleration.y:.6f},")
+            f.write(f"{zed_imu.linear_acceleration.z:.6f},")
+            f.write(f"{zed_imu.angular_velocity.x:.6f},")
+            f.write(f"{zed_imu.angular_velocity.y:.6f},")
+            f.write(f"{zed_imu.angular_velocity.z:.6f}\n")
+
+    def _save_tf_odom(self, tf_msg, odom_msg, time_str):
+        """保存TF和里程计数据(网页6的rosbag存储结构参考)"""
+        # 保存TF
+        tf_path = os.path.join(self.tf_path, f"tf_{time_str}.txt")
+        with open(tf_path, 'w') as f:
+            for transform in tf_msg.transforms:
+                f.write(f"{transform.header.frame_id}->{transform.child_frame_id}\n")
+                f.write(f"translation: {transform.transform.translation}\n")
+                f.write(f"rotation: {transform.transform.rotation}\n")
+                
+        # 保存里程计路径（网页4的Path消息处理）
+        odom_path = os.path.join(self.odometry_path, f"odom_{time_str}.txt")
+        with open(odom_path, 'w') as f:
+            for pose in odom_msg.poses:
+                f.write(f"time_stamp:{pose.header.stamp.to_sec():.6f}\n")
+                f.write(f"position_x:{pose.pose.position.x:.3f}\n")
+                f.write(f"position_y:{pose.pose.position.y:.3f}\n")
+                f.write(f"position_z:{pose.pose.position.x:.3f}\n")
+                f.write(f"orientation_x:{pose.pose.position.x:.3f}\n")
+                f.write(f"orientation_y:{pose.pose.position.y:.3f}\n")
+                f.write(f"orientation_z:{pose.pose.orientation.z:.3f}\n")
+      
+if __name__ == "__main__":
+    try:
+        node = Fliter()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        rospy.logerr("Node terminated abnormally")

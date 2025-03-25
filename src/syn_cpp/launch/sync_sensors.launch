@@ -1,0 +1,14 @@
+<launch>
+    <arg name="base_dir" default="/home/hjyeee/Data/Dataset/person_search/VLM-search" />
+    <arg name="bag_date" default="2024-12-04-21-49-14" />
+    <arg name="delay" default="3" /> <!-- Pause duration in seconds -->
+    <!-- Start the sync_sensors node -->
+    <node name="sync_sensors" pkg="synchronizer" type="sync" output="screen">
+        <param name="date" type="str" value="$(arg bag_date)" />
+        <param name="dir" value="$(arg base_dir)" />
+    </node>
+
+    <!-- Play the bag file with the date as its name, use the bag's timestamps, and delay the play start -->
+    <node name="play_bag" pkg="rosbag" type="play" args="$(arg base_dir)/$(arg bag_date).bag --clock --delay=$(arg delay)" output="screen" />
+
+</launch>

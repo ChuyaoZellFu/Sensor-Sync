@@ -1,0 +1,2 @@
+syn_cpp:syn_py
+-DCATKIN_DEVEL_PREFIX=/home/slam327/syn_ws/devel -DCMAKE_INSTALL_PREFIX=/home/slam327/syn_ws/install -G Unix Makefiles

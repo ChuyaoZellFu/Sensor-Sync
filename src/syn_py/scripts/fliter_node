@@ -2,7 +2,7 @@
 import math
 import rospy
 import message_filters
-from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage
+from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage,Image
 import sensor_msgs.point_cloud2 as pc2
 from nav_msgs.msg import Path
 from tf2_msgs.msg import TFMessage
@@ -35,8 +35,8 @@ class Fliter():
         self.bridge = CvBridge()
         
         # 创建图像发布者（使用image_transport的Python等效方式）
-        self.image_pub_zed = rospy.Publisher("/projected_image_zed", CompressedImage, queue_size=1)
-        self.image_pub_pan = rospy.Publisher("/projected_image_pan", CompressedImage, queue_size=1)
+        self.image_pub_zed = rospy.Publisher("/projected_image_zed", Image, queue_size=1)
+        self.image_pub_pan = rospy.Publisher("/projected_image_pan", Image, queue_size=1)
 
         self._init_subscribers()
         self._init_synchronizer()
@@ -50,7 +50,7 @@ class Fliter():
         self.zed_image_sub = message_filters.Subscriber('/zed2/zed_node/rgb/image_rect_color/compressed',CompressedImage)
         self.odom_sub = message_filters.Subscriber('zed2/zed_node/path_odom', Path)
         self.points_sub = message_filters.Subscriber('/ouster/points', PointCloud2)
-        self.tf_sub = message_filters.Subscriber('/tf',TFMessage)
+        # self.tf_sub = message_filters.Subscriber('/tf',TFMessage)
         self.ouster_imu_sub = message_filters.Subscriber('/ouster/imu',Imu)
         self.zed2_imu_sub = message_filters.Subscriber('/zed2/zed_node/imu/data',Imu)
 
@@ -63,12 +63,12 @@ class Fliter():
              self.zed_image_sub,
              self.odom_sub, 
              self.points_sub, 
-             self.tf_sub, 
+            #  self.tf_sub, 
              self.ouster_imu_sub, 
              self.zed2_imu_sub
             ],
-            queue_size=30,
-            slop=0.5,
+            queue_size=300,
+            slop=5,
             allow_headerless=True
         )
 
@@ -93,14 +93,16 @@ class Fliter():
         self.zed_image_path = os.path.join(self.data_root, "ZED_Image" ,today)
         self.odometry_path = os.path.join(self.data_root, "Odom" ,today)
         self.points_path = os.path.join(self.data_root, "Points" ,today)
-        self.tf_path = os.path.join(self.data_root, "TF" ,today)
+        # self.tf_path = os.path.join(self.data_root, "TF" ,today)
         self.imu_path = os.path.join(self.data_root, "imu" ,today)
 
         for paths in [self.camera_info_path,
+                    self.zed_camera_info_path,
                     self.image_path,
+                    self.zed_image_path,
                     self.odometry_path,
                     self.points_path,
-                    self.tf_path,
+                    # self.tf_path,
                     self.imu_path]:
             try:
                 os.makedirs(paths, exist_ok=True)
@@ -111,7 +113,8 @@ class Fliter():
 
     def callback(self, camera_info_msg, zed_camera_info_msg, 
                  image_msg, zed_image_msg, odom_msg, points_msg, 
-                 tf_msg, ouster_imu_msg, zed2_imu_msg):
+                #  tf_msg, 
+                 ouster_imu_msg, zed2_imu_msg):
 
         #首先确认是否收到消息并打印时间戳
         print('Received synchronized messages')
@@ -123,7 +126,7 @@ class Fliter():
             zed_image_msg.header.stamp.to_sec(),
             odom_msg.header.stamp.to_sec(),          # Odometry
             points_msg.header.stamp.to_sec(),        # Points
-            tf_msg.transforms[0].header.stamp.to_sec(),  # TF (取第一个transform的时间)
+            # tf_msg.transforms[0].header.stamp.to_sec(),  # TF (取第一个transform的时间)
             ouster_imu_msg.header.stamp.to_sec(),    # Ouster Imu
             zed2_imu_msg.header.stamp.to_sec()       # Zed2 Imu
         ]
@@ -137,9 +140,9 @@ class Fliter():
             "Image": timestamps_sec[1] - base_time,
             "Odometry": timestamps_sec[2] - base_time,
             "Points": timestamps_sec[3] - base_time,
-            "TF": timestamps_sec[4] - base_time,
-            "Ouster Imu": timestamps_sec[5] - base_time,
-            "Zed2 Imu": timestamps_sec[6] - base_time
+          #  "TF": timestamps_sec[4] - base_time,
+            "Ouster Imu": timestamps_sec[4] - base_time,
+            "Zed2 Imu": timestamps_sec[5] - base_time
         }
 
         # 计算消息组内的最大时间差（所有消息之间的最大间隔）
@@ -206,7 +209,7 @@ class Fliter():
             self._save_imu_data(ouster_imu_msg, zed2_imu_msg, time_str)
             
             # 保存TF和Odom（网页4的消息处理示例）
-            self._save_tf_odom(tf_msg, odom_msg, time_str)
+            # self._save_tf_odom(tf_msg, odom_msg, time_str)
             
         except Exception as e:
             rospy.logerr(f"数据存储失败：{str(e)}")
@@ -243,8 +246,8 @@ class Fliter():
         #创建用于投影的图像
         try:
             # 转换ROS图像消息为OpenCV格式 (BGR8编码)
-            image_pan = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding='bgr8')
-            image_zed = self.bridge.imgmsg_to_cv2(zed_image_msg, desired_encoding='bgr8')
+            image_pan = self.bridge.compressed_imgmsg_to_cv2(image_msg, desired_encoding='bgr8')
+            image_zed = self.bridge.compressed_imgmsg_to_cv2(zed_image_msg, desired_encoding='bgr8')
             
             # 创建图像拷贝（深拷贝）
             projected_image_zed = image_zed.copy()
@@ -304,7 +307,7 @@ class Fliter():
                 cv2.circle(projected_image, (u, v), 1, (intensity,)*3, -1)
 
 
-    def projection_calculator(X,Y,Z,image_width,image_height):
+    def projection_calculator(self, X, Y, Z, image_width, image_height):
         # 计算水平角度（范围：-π 到 π）
         theta = math.atan2(X, Z)  # 注意参数顺序为 (y, x)，这里使用 (X, Z)
         

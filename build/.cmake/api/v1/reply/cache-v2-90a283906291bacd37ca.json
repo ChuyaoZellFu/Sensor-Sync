@@ -2631,7 +2631,7 @@
 				}
 			],
 			"type" : "PATH",
-			"value" : "GTest_DIR-NOTFOUND"
+			"value" : "/home/slam327/anaconda3/lib/cmake/GTest"
 		},
 		{
 			"name" : "INSTALL_GTEST",

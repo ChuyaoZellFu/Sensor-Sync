@@ -140,7 +140,7 @@ class Fliter():
             "Image": timestamps_sec[1] - base_time,
             "Odometry": timestamps_sec[2] - base_time,
             "Points": timestamps_sec[3] - base_time,
-           "TF": timestamps_sec[4] - base_time,
+            "TF": timestamps_sec[4] - base_time,
             "Ouster Imu": timestamps_sec[4] - base_time,
             "Zed2 Imu": timestamps_sec[5] - base_time
         }
@@ -258,7 +258,29 @@ class Fliter():
             return None
 
         #投影点云到ZED图像平面
-        self.point_to_image_proj(transformed_cloud_zed,projected_image_zed)
+        for point in read_points(transformed_cloud_zed, field_names=("x", "y", "z"), skip_nans=True):
+            x, y, z = point[0], point[1], point[2]
+            
+            if z <= 0:
+                continue
+            
+            fx_ = zed_camera_info_msg.K[0]
+            fy_ = zed_camera_info_msg.K[4]
+            cx_ = zed_camera_info_msg.K[2]
+            cy_ = zed_camera_info_msg.K[5]
+            u = fx_ * x / z + cx_
+            v = fy_ * y / z + cy_
+            
+            # 边界检查
+            if 0 <= u < projected_image_zed.shape[1] and 0 <= v < projected_image_zed.shape[0]:
+                # 计算颜色强度
+                D = z
+                intensity = 255 * (1 - (D - 0.0) / (50.0 - 0.0))
+                intensity = np.clip(intensity, 0, 255)
+                
+                # 绘制点
+                cv2.circle(projected_image_zed, (u, v), 1, (intensity,)*3, -1)
+                
         #投影点云到全景相机图像平面
         self.point_to_image_proj(transformed_cloud_pan,projected_image_pan)
 

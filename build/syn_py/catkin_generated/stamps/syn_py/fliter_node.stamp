@@ -50,7 +50,7 @@ class Fliter():
         self.zed_image_sub = message_filters.Subscriber('/zed2/zed_node/rgb/image_rect_color/compressed',CompressedImage)
         self.odom_sub = message_filters.Subscriber('zed2/zed_node/path_odom', Path)
         self.points_sub = message_filters.Subscriber('/ouster/points', PointCloud2)
-        # self.tf_sub = message_filters.Subscriber('/tf',TFMessage)
+        self.tf_sub = message_filters.Subscriber('/tf',TFMessage)
         self.ouster_imu_sub = message_filters.Subscriber('/ouster/imu',Imu)
         self.zed2_imu_sub = message_filters.Subscriber('/zed2/zed_node/imu/data',Imu)
 
@@ -63,7 +63,7 @@ class Fliter():
              self.zed_image_sub,
              self.odom_sub, 
              self.points_sub, 
-            #  self.tf_sub, 
+             self.tf_sub, 
              self.ouster_imu_sub, 
              self.zed2_imu_sub
             ],
@@ -93,7 +93,7 @@ class Fliter():
         self.zed_image_path = os.path.join(self.data_root, "ZED_Image" ,today)
         self.odometry_path = os.path.join(self.data_root, "Odom" ,today)
         self.points_path = os.path.join(self.data_root, "Points" ,today)
-        # self.tf_path = os.path.join(self.data_root, "TF" ,today)
+        self.tf_path = os.path.join(self.data_root, "TF" ,today)
         self.imu_path = os.path.join(self.data_root, "imu" ,today)
 
         for paths in [self.camera_info_path,
@@ -102,7 +102,7 @@ class Fliter():
                     self.zed_image_path,
                     self.odometry_path,
                     self.points_path,
-                    # self.tf_path,
+                    self.tf_path,
                     self.imu_path]:
             try:
                 os.makedirs(paths, exist_ok=True)
@@ -113,7 +113,7 @@ class Fliter():
 
     def callback(self, camera_info_msg, zed_camera_info_msg, 
                  image_msg, zed_image_msg, odom_msg, points_msg, 
-                #  tf_msg, 
+                 tf_msg, 
                  ouster_imu_msg, zed2_imu_msg):
 
         #首先确认是否收到消息并打印时间戳
@@ -126,7 +126,7 @@ class Fliter():
             zed_image_msg.header.stamp.to_sec(),
             odom_msg.header.stamp.to_sec(),          # Odometry
             points_msg.header.stamp.to_sec(),        # Points
-            # tf_msg.transforms[0].header.stamp.to_sec(),  # TF (取第一个transform的时间)
+            tf_msg.transforms[0].header.stamp.to_sec(),  # TF (取第一个transform的时间)
             ouster_imu_msg.header.stamp.to_sec(),    # Ouster Imu
             zed2_imu_msg.header.stamp.to_sec()       # Zed2 Imu
         ]
@@ -140,7 +140,7 @@ class Fliter():
             "Image": timestamps_sec[1] - base_time,
             "Odometry": timestamps_sec[2] - base_time,
             "Points": timestamps_sec[3] - base_time,
-          #  "TF": timestamps_sec[4] - base_time,
+            "TF": timestamps_sec[4] - base_time,
             "Ouster Imu": timestamps_sec[4] - base_time,
             "Zed2 Imu": timestamps_sec[5] - base_time
         }
@@ -209,7 +209,7 @@ class Fliter():
             self._save_imu_data(ouster_imu_msg, zed2_imu_msg, time_str)
             
             # 保存TF和Odom（网页4的消息处理示例）
-            # self._save_tf_odom(tf_msg, odom_msg, time_str)
+            self._save_tf_odom(tf_msg, odom_msg, time_str)
             
         except Exception as e:
             rospy.logerr(f"数据存储失败：{str(e)}")
@@ -258,7 +258,29 @@ class Fliter():
             return None
 
         #投影点云到ZED图像平面
-        self.point_to_image_proj(transformed_cloud_zed,projected_image_zed)
+        for point in read_points(transformed_cloud_zed, field_names=("x", "y", "z"), skip_nans=True):
+            x, y, z = point[0], point[1], point[2]
+            
+            if z <= 0:
+                continue
+            
+            fx_ = zed_camera_info_msg.K[0]
+            fy_ = zed_camera_info_msg.K[4]
+            cx_ = zed_camera_info_msg.K[2]
+            cy_ = zed_camera_info_msg.K[5]
+            u = fx_ * x / z + cx_
+            v = fy_ * y / z + cy_
+            
+            # 边界检查
+            if 0 <= u < projected_image_zed.shape[1] and 0 <= v < projected_image_zed.shape[0]:
+                # 计算颜色强度
+                D = z
+                intensity = 255 * (1 - (D - 0.0) / (50.0 - 0.0))
+                intensity = np.clip(intensity, 0, 255)
+                
+                # 绘制点
+                cv2.circle(projected_image_zed, (u, v), 1, (intensity,)*3, -1)
+                
         #投影点云到全景相机图像平面
         self.point_to_image_proj(transformed_cloud_pan,projected_image_pan)
 

@@ -2,7 +2,7 @@
 import math
 import rospy
 import message_filters
-from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage,Image
+from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage
 import sensor_msgs.point_cloud2 as pc2
 from nav_msgs.msg import Path
 from tf2_msgs.msg import TFMessage
@@ -35,8 +35,8 @@ class Fliter():
         self.bridge = CvBridge()
         
         # 创建图像发布者（使用image_transport的Python等效方式）
-        self.image_pub_zed = rospy.Publisher("/projected_image_zed", Image, queue_size=1)
-        self.image_pub_pan = rospy.Publisher("/projected_image_pan", Image, queue_size=1)
+        self.image_pub_zed = rospy.Publisher("/projected_image_zed", CompressedImage, queue_size=1)
+        self.image_pub_pan = rospy.Publisher("/projected_image_pan", CompressedImage, queue_size=1)
 
         self._init_subscribers()
         self._init_synchronizer()
@@ -258,6 +258,7 @@ class Fliter():
             return None
 
         #投影点云到ZED图像平面
+        min_D, max_D = 0.0, 50.0
         for point in read_points(transformed_cloud_zed, field_names=("x", "y", "z"), skip_nans=True):
             x, y, z = point[0], point[1], point[2]
             
@@ -268,26 +269,26 @@ class Fliter():
             fy_ = zed_camera_info_msg.K[4]
             cx_ = zed_camera_info_msg.K[2]
             cy_ = zed_camera_info_msg.K[5]
-            u = fx_ * x / z + cx_
-            v = fy_ * y / z + cy_
+            u = int(fx_ * x / z + cx_)
+            v = int(fy_ * y / z + cy_)
             
             # 边界检查
             if 0 <= u < projected_image_zed.shape[1] and 0 <= v < projected_image_zed.shape[0]:
                 # 计算颜色强度
                 D = z
-                intensity = 255 * (1 - (D - 0.0) / (50.0 - 0.0))
+                intensity = 255 * (1 - (D - min_D) / (max_D - min_D))
                 intensity = np.clip(intensity, 0, 255)
                 
                 # 绘制点
                 cv2.circle(projected_image_zed, (u, v), 1, (intensity,)*3, -1)
-                
+
         #投影点云到全景相机图像平面
         self.point_to_image_proj(transformed_cloud_pan,projected_image_pan)
 
         #发布投影后ZED图像
         try:
             # 将OpenCV图像转换为ROS Image消息
-            output_msg_zed = self.bridge.cv2_to_imgmsg(projected_image_zed, encoding="bgr8")
+            output_msg_zed = self.bridge.cv2_to_compressed_imgmsg(projected_image_zed,dst_format="jpg")
             # 保持与原始消息相同的header信息（时间戳+坐标系）
             output_msg_zed.header = zed_image_msg.header
             # 发布消息
@@ -298,7 +299,7 @@ class Fliter():
         #发布投影后全景图像
         try:
             # 将OpenCV图像转换为ROS Image消息
-            output_msg_pan = self.bridge.cv2_to_imgmsg(projected_image_pan, encoding="bgr8")
+            output_msg_pan = self.bridge.cv2_to_compressed_imgmsg(projected_image_pan,dst_format="jpg")
             # 保持与原始消息相同的header信息（时间戳+坐标系）
             output_msg_pan.header = image_msg.header
             # 发布消息

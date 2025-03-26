@@ -3,23 +3,24 @@ import rospy
 import tf2_ros
 import tf2_py as tf2
 from cv_bridge import CvBridge, CvBridgeError
-from sensor_msgs.msg import PointCloud2,CompressedImage
+from sensor_msgs.msg import PointCloud2,CompressedImage,PointField
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 from sensor_msgs.point_cloud2 import read_points
 import os
 import re
 from collections import defaultdict
-import pcl
 import cv2
 import numpy as np
 import math
+from std_msgs.msg import Header
+import open3d as o3d
 
 
 class Projection():
     def __init__(self):
         rospy.init_node('projection_node',anonymous=False)
         rospy.set_param('/use_sim_time', True)
-        self.root_dir = "~/sensor_data"
+        self.root_dir = "/home/slam327/sensor_data"
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
@@ -68,22 +69,32 @@ class Projection():
 
     def pcd_to_pointcloud2(self, stamp, pcd_path):
         """
-        pcd点云转为ros消息格式
+        pcd点云转为PointCloud2消息格式
         """
-        # 加载 PCD 文件到 PCL 点云对象
-        pcl_cloud = pcl.load(pcd_path)  
+        # 读取PCD文件
+        pcd = o3d.io.read_point_cloud(pcd_path)
+        points = np.asarray(pcd.points)
         
-        # 创建空的 PointCloud2 消息
-        points_msg = PointCloud2()
+        # 创建PointCloud2消息对象
+        msg = PointCloud2()
+        msg.header = Header(frame_id="os_sensor",stamp=stamp)  # 根据实际情况设置frame_id
+        msg.height = 1
+        msg.width = points.shape[0]
         
-        # 将 PCL 点云转换为 ROS PointCloud2
-        points_msg = pcl_cloud.to_msg()
+        # 定义字段：x, y, z
+        msg.fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1)
+        ]
+        msg.point_step = 12  # 每个点的字节数（3个float32，每个4字节）
+        msg.row_step = msg.point_step * msg.width
+        msg.is_dense = False  # 无无效点
         
-        # 设置消息头（时间戳和坐标系）
-        points_msg.header.stamp = stamp  # 或从文件名解析时间戳
-        points_msg.header.frame_id = "os_sensor"
+        # 将numpy数组转换为字节流
+        msg.data = points.astype(np.float32).tobytes()
         
-        return points_msg
+        return msg
     
     def get_sensor_path(self, timestamp_map, timestamp, sensor_type):
         """
@@ -107,7 +118,7 @@ class Projection():
         for ts in sorted_ts:
 
             # 获取当前时间戳和传感器路径
-            match = re.search(r'_(\d{10})_(\d+)\.', ts)
+            match = re.search(r'(\d{10})_(\d+)', ts)
             if not match:
                 raise ValueError(f"文件名格式错误，无法解析时间戳: {ts}")
             secs_str, nsecs_str = match.groups()
@@ -116,7 +127,7 @@ class Projection():
             stamp = rospy.Time(secs, nsecs)
             path = self.get_sensor_path(timestamp_map,ts,"Points")
             # 获取点云信息
-            points_msg = self.pcd_to_pointcloud2(stamp, stamp, path)
+            points_msg = self.pcd_to_pointcloud2(stamp, path)
 
             # 获取激光雷达到zed相机的变换
             try:
@@ -195,6 +206,8 @@ class Projection():
                 # 保持与原始消息相同的header信息（时间戳+坐标系）
                 output_msg_zed.header.stamp = stamp
                 output_msg_zed.header.frame_id = "zed2_left_camera_optical_frame"
+                #保存到本地
+                self._save_compressed_image(output_msg_zed,stamp,zed=True)
                 # 发布消息
                 self.image_pub_zed.publish(output_msg_zed)
             except CvBridgeError as e:
@@ -207,12 +220,25 @@ class Projection():
                 # 保持与原始消息相同的header信息（时间戳+坐标系）
                 output_msg_pan.header.stamp = stamp
                 output_msg_pan.header.frame_id = "theta_camera_optical_frame"
+                #保存到本地
+                self._save_compressed_image(output_msg_zed,stamp,zed=False)
                 # 发布消息
                 self.image_pub_pan.publish(output_msg_pan)
             except CvBridgeError as e:
                 rospy.logerr("图像转换失败: %s", str(e))
 
-        
+
+    def _save_compressed_image(self, msg, time_str, zed):
+        """保存JPEG压缩图像(网页1的图像存储建议)"""
+        if not zed:
+            path = os.path.join("/home/slam327/sensor_data/Image_Proj", f"image_{time_str}.jpg")
+        else:
+            path = os.path.join("/home/slam327/sensor_data/ZED_Image_Proj", f"image_{time_str}.jpg")
+        np_arr = np.frombuffer(msg.data, np.uint8)
+        cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        cv2.imwrite(path, cv_image)
+
+
     #点云到图像的投影
     def point_to_image_proj(self, transformed_cloud, projected_image):
         min_D, max_D = 0.0, 50.0

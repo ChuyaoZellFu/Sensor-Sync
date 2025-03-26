@@ -27,7 +27,7 @@ class Fliter():
         self.last_odom_2 = None
         self.last_stamp_1 = None
         self.last_stamp_2 = None
-        
+
         self._init_subscribers()
         self._init_synchronizer()
         self.data_root = os.path.expanduser("~/sensor_data")  # 存储根目录
@@ -57,8 +57,8 @@ class Fliter():
              self.ouster_imu_sub, 
              self.zed2_imu_sub
             ],
-            queue_size=300,
-            slop=5,
+            queue_size=100,
+            slop=1,
             allow_headerless=True
         )
 

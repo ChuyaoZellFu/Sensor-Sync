@@ -3,7 +3,7 @@ import rospy
 import tf2_ros
 import tf2_py as tf2
 from cv_bridge import CvBridge, CvBridgeError
-from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage
+from sensor_msgs.msg import PointCloud2,CompressedImage
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 from sensor_msgs.point_cloud2 import read_points
 import os
@@ -262,6 +262,7 @@ class Projection():
 if __name__ == "__main__":
     try:
         node = Projection()
+        node.transform_and_projection()
         rospy.spin()
     except rospy.ROSInterruptException:
         rospy.logerr("Node terminated abnormally")

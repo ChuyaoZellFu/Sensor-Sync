@@ -1030,6 +1030,13 @@
 			"path" : "/opt/ros/noetic/share/catkin/cmake/templates/script.py.in"
 		},
 		{
+			"path" : "syn_py/scripts/projection_node"
+		},
+		{
+			"isExternal" : true,
+			"path" : "/opt/ros/noetic/share/catkin/cmake/templates/script.py.in"
+		},
+		{
 			"path" : "syn_cpp/CMakeLists.txt"
 		},
 		{

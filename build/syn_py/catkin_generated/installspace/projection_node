@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+import rospy
+import tf2_ros
+import tf2_py as tf2
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Imu, PointCloud2,CameraInfo,CompressedImage
+from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
+from sensor_msgs.point_cloud2 import read_points
+import os
+import re
+from collections import defaultdict
+import pcl
+import cv2
+import numpy as np
+import math
+
+
+class Projection():
+    def __init__(self):
+        rospy.init_node('projection_node',anonymous=False)
+        rospy.set_param('/use_sim_time', True)
+        self.root_dir = "~/sensor_data"
+
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+        # 初始化cv_bridge
+        self.bridge = CvBridge()
+        
+        # 创建图像发布者（使用image_transport的Python等效方式）
+        self.image_pub_zed = rospy.Publisher("/projected_image_zed", CompressedImage, queue_size=1)
+        self.image_pub_pan = rospy.Publisher("/projected_image_pan", CompressedImage, queue_size=1)
+
+    def extract_timestamp(self,filename):
+        """从文件名中提取时间戳:timestamp1_timestamp2"""
+        match = re.search(r"_(\d{10}_\d+)\.", filename)
+        if match:
+            return match.group(1)
+        return None
+
+    def collect_files(self,root_dir):
+        """
+        遍历目录结构，收集所有传感器数据文件
+        返回数据结构：{时间戳: {"Image": path, "Lidar": path, ...}}
+        """
+        timestamp_map = defaultdict(dict)
+        
+        # 遍历所有传感器类型文件夹（如 Image、Lidar 等）
+        for sensor in os.listdir(root_dir):
+            sensor_dir = os.path.join(root_dir, sensor)
+            if not os.path.isdir(sensor_dir):
+                continue
+                
+            # 递归遍历日期子文件夹
+            for root, _, files in os.walk(sensor_dir):
+                for file in files:
+                    # 提取时间戳
+                    ts = self.extract_timestamp(file)
+                    if ts is None:
+                        continue  # 跳过无法解析的文件
+                    
+                    # 记录文件路径
+                    full_path = os.path.join(root, file)
+                    timestamp_map[ts][sensor] = full_path
+                    
+        return timestamp_map
+    
+
+    def pcd_to_pointcloud2(self, stamp, pcd_path):
+        """
+        pcd点云转为ros消息格式
+        """
+        # 加载 PCD 文件到 PCL 点云对象
+        pcl_cloud = pcl.load(pcd_path)  
+        
+        # 创建空的 PointCloud2 消息
+        points_msg = PointCloud2()
+        
+        # 将 PCL 点云转换为 ROS PointCloud2
+        points_msg = pcl_cloud.to_msg()
+        
+        # 设置消息头（时间戳和坐标系）
+        points_msg.header.stamp = stamp  # 或从文件名解析时间戳
+        points_msg.header.frame_id = "os_sensor"
+        
+        return points_msg
+    
+    def get_sensor_path(self, timestamp_map, timestamp, sensor_type):
+        """
+        获取指定时间戳和传感器类型的文件路径
+        :param timestamp_map: 总数据字典
+        :param timestamp: 目标时间戳(int)
+        :param sensor_type: 传感器类型（如 "Image")
+        :return: 文件路径（若存在），否则返回 None
+        """
+        sensor_data = timestamp_map.get(timestamp, {})
+        return sensor_data.get(sensor_type)
+
+
+    def transform_and_projection(self):
+        '''
+        点云到图像投影以及点云标注
+        '''
+        timestamp_map = self.collect_files(self.root_dir)
+        # 按时间戳遍历数据
+        sorted_ts = sorted(timestamp_map.keys())
+        for ts in sorted_ts:
+
+            # 获取当前时间戳和传感器路径
+            match = re.search(r'_(\d{10})_(\d+)\.', ts)
+            if not match:
+                raise ValueError(f"文件名格式错误，无法解析时间戳: {ts}")
+            secs_str, nsecs_str = match.groups()
+            secs = int(secs_str)
+            nsecs = int(nsecs_str.ljust(9, '0'))
+            stamp = rospy.Time(secs, nsecs)
+            path = self.get_sensor_path(timestamp_map,ts,"Points")
+            # 获取点云信息
+            points_msg = self.pcd_to_pointcloud2(stamp, stamp, path)
+
+            # 获取激光雷达到zed相机的变换
+            try:
+                # 获取坐标变换
+                transform_stamped_zed = self.tf_buffer.lookup_transform(
+                    target_frame="zed2_left_camera_optical_frame",
+                    source_frame="os_sensor",
+                    time=points_msg.header.stamp,
+                    timeout=rospy.Duration(0.1))
+            except (tf2.LookupException, tf2.ConnectivityException, tf2.ExtrapolationException) as e:
+                rospy.logwarn(f"TF error: {str(e)}")
+                return
+            # 获取激光雷达到全景相机的变换
+            try:
+                # 获取坐标变换
+                transform_stamped_pan = self.tf_buffer.lookup_transform(
+                    target_frame="theta_camera_optical_frame",
+                    source_frame="os_sensor",
+                    time=points_msg.header.stamp,
+                    timeout=rospy.Duration(0.1))
+            except (tf2.LookupException, tf2.ConnectivityException, tf2.ExtrapolationException) as e:
+                rospy.logwarn(f"TF error: {str(e)}")
+                return
+            
+            #将点云转换到zed相机坐标系
+            transformed_cloud_zed = do_transform_cloud(points_msg, transform_stamped_zed)
+            #将点云转换到全景相机坐标系
+            transformed_cloud_pan = do_transform_cloud(points_msg, transform_stamped_pan)
+
+            #创建用于投影的图像
+            try:
+                # 转换ROS图像消息为OpenCV格式 (BGR8编码)
+                image_pan = cv2.imread(self.get_sensor_path(timestamp_map,ts,"Image"))
+                image_zed = cv2.imread(self.get_sensor_path(timestamp_map,ts,"ZED_Image"))
+                
+                # 创建图像拷贝（深拷贝）
+                projected_image_zed = image_zed.copy()
+                projected_image_pan = image_pan.copy()
+        
+            except CvBridgeError as e:
+                print(f"图像转换失败: {str(e)}")
+                return None
+
+            #投影点云到ZED图像平面
+            min_D, max_D = 0.0, 50.0
+            for point in read_points(transformed_cloud_zed, field_names=("x", "y", "z"), skip_nans=True):
+                x, y, z = point[0], point[1], point[2]
+                
+                if z <= 0:
+                    continue
+                
+                fx_ = 266.797699
+                fy_ = 266.797699
+                cx_ = 329.373871
+                cy_ = 176.244690
+                u = int(fx_ * x / z + cx_)
+                v = int(fy_ * y / z + cy_)
+                
+                # 边界检查
+                if 0 <= u < projected_image_zed.shape[1] and 0 <= v < projected_image_zed.shape[0]:
+                    # 计算颜色强度
+                    D = z
+                    intensity = 255 * (1 - (D - min_D) / (max_D - min_D))
+                    intensity = np.clip(intensity, 0, 255)
+                    
+                    # 绘制点
+                    cv2.circle(projected_image_zed, (u, v), 1, (intensity,)*3, -1)
+
+            #投影点云到全景相机图像平面
+            self.point_to_image_proj(transformed_cloud_pan,projected_image_pan)
+
+            #发布投影后ZED图像
+            try:
+                # 将OpenCV图像转换为ROS Image消息
+                output_msg_zed = self.bridge.cv2_to_compressed_imgmsg(projected_image_zed,dst_format="jpg")
+                # 保持与原始消息相同的header信息（时间戳+坐标系）
+                output_msg_zed.header.stamp = stamp
+                output_msg_zed.header.frame_id = "zed2_left_camera_optical_frame"
+                # 发布消息
+                self.image_pub_zed.publish(output_msg_zed)
+            except CvBridgeError as e:
+                rospy.logerr("图像转换失败: %s", str(e))
+            
+            #发布投影后全景图像
+            try:
+                # 将OpenCV图像转换为ROS Image消息
+                output_msg_pan = self.bridge.cv2_to_compressed_imgmsg(projected_image_pan,dst_format="jpg")
+                # 保持与原始消息相同的header信息（时间戳+坐标系）
+                output_msg_pan.header.stamp = stamp
+                output_msg_pan.header.frame_id = "theta_camera_optical_frame"
+                # 发布消息
+                self.image_pub_pan.publish(output_msg_pan)
+            except CvBridgeError as e:
+                rospy.logerr("图像转换失败: %s", str(e))
+
+        
+    #点云到图像的投影
+    def point_to_image_proj(self, transformed_cloud, projected_image):
+        min_D, max_D = 0.0, 50.0
+        for point in read_points(transformed_cloud, field_names=("x", "y", "z"), skip_nans=True):
+            x, y, z = point[0], point[1], point[2]
+            
+            if z <= 0:
+                continue
+            
+            (u,v) = self.projection_calculator(x,y,z,projected_image.shape[1],projected_image.shape[0])
+            
+            # 边界检查
+            if 0 <= u < projected_image.shape[1] and 0 <= v < projected_image.shape[0]:
+                # 计算颜色强度
+                D = z
+                intensity = 255 * (1 - (D - min_D) / (max_D - min_D))
+                intensity = np.clip(intensity, 0, 255)
+                
+                # 绘制点
+                cv2.circle(projected_image, (u, v), 1, (intensity,)*3, -1)
+
+
+    def projection_calculator(self, X, Y, Z, image_width, image_height):
+        # 计算水平角度（范围：-π 到 π）
+        theta = math.atan2(X, Z)  # 注意参数顺序为 (y, x)，这里使用 (X, Z)
+        
+        # 计算垂直角度（范围：-π/2 到 π/2）
+        denominator = math.sqrt(X**2 + Y**2 + Z**2)
+        if denominator == 0:
+            return (0, 0)  # 避免除以零错误
+        phi = math.asin(-Y / denominator)
+        
+        # 将角度映射到图像坐标系
+        # 水平方向：将 [-π, π] 映射到 [0, image_width]
+        u = int(image_width * ( (theta + math.pi) / (2 * math.pi) ))
+        
+        # 垂直方向：将 [-π/2, π/2] 映射到 [0, image_height]
+        v = int(image_height * ( (math.pi/2 - phi) / math.pi ))
+        
+        # 限制坐标在图像范围内
+        u = max(0, min(u, image_width - 1))
+        v = max(0, min(v, image_height - 1))
+        
+        return (u, v)
+
+
+if __name__ == "__main__":
+    try:
+        node = Projection()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        rospy.logerr("Node terminated abnormally")

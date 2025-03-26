@@ -56,3 +56,7 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
   file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/syn_py" TYPE PROGRAM FILES "/home/slam327/syn_ws/build/syn_py/catkin_generated/installspace/fliter_node")
 endif()
 
+if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/syn_py" TYPE PROGRAM FILES "/home/slam327/syn_ws/build/syn_py/catkin_generated/installspace/projection_node")
+endif()
+

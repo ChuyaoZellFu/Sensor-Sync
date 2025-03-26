@@ -1,6 +1,6 @@
 set(_CATKIN_CURRENT_PACKAGE "syn_py")
 set(syn_py_VERSION "0.0.0")
-set(syn_py_MAINTAINER "slam327 <zell2025@qq.com>")
+set(syn_py_MAINTAINER "ChuyaoZellFu <1365353973@qq.com>")
 set(syn_py_PACKAGE_FORMAT "2")
 set(syn_py_BUILD_DEPENDS "rospy" "sensor_msgs" "std_msgs" "cv_bridge" "message_filters" "tf2_ros" "opencv4")
 set(syn_py_BUILD_EXPORT_DEPENDS "rospy" "sensor_msgs" "std_msgs" "opencv4")

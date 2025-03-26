@@ -20,6 +20,7 @@ catkin_package(
 catkin_install_python(
   PROGRAMS
     scripts/fliter_node  # 确保路径与实际文件位置一致
+    scripts/projection_node
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

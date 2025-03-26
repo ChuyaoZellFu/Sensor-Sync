@@ -31,6 +31,7 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/home/slam327/syn_ws/src/syn_py/CMakeLists.txt"
   "/home/slam327/syn_ws/src/syn_py/package.xml"
   "/home/slam327/syn_ws/src/syn_py/scripts/fliter_node"
+  "/home/slam327/syn_ws/src/syn_py/scripts/projection_node"
   "/opt/ros/noetic/share/actionlib/cmake/actionlib-msg-extras.cmake"
   "/opt/ros/noetic/share/actionlib/cmake/actionlibConfig-version.cmake"
   "/opt/ros/noetic/share/actionlib/cmake/actionlibConfig.cmake"

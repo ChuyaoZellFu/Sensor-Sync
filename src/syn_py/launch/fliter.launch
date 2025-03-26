@@ -19,6 +19,10 @@
     <!-- NOW after 2024/12/16--> <!-- TRUE-->
     <node pkg="tf2_ros" type="static_transform_publisher" name="static_transform_publisher2" args="0.11540335 -0.31534779 -0.06535279 -0.06479868 -0.01478066  0.00892244  0.99774899 zed2_left_camera_optical_frame theta_camera_optical_frame"/>
 
+
+    <!-- Play the bag file with the date as its name, use the bag's timestamps, and delay the play start -->
+    <node name="play_bag" pkg="rosbag" type="play" args="/home/slam327/rosbag/$(arg bag_date).bag --clock -r 0.2 --delay=$(arg delay)" output="log" />
+    
     <!-- Open the rpf_bench_calibration.rviz file -->
     <node name="rviz" pkg="rviz" type="rviz" args="-d /home/slam327/syn_ws/src/syn_py/rviz/fliter_node.rviz" />
 
